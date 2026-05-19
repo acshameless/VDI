@@ -1,0 +1,482 @@
+没问题，我为你重新整理一份 从 0 到 1 的完整教程。这份教程专门解决了你之前碰到的 AccessDeniedException 问题，并清晰地展示了 LF-Tag 键值对授权 和 LF-Tag 表达式授权 的核心区别，同时加入了列级权限控制。
+
+---
+
+✅ 准备工作：获取管理员权限
+
+你之前创建 LF-Tag 时报错，是因为当前用户既缺少 IAM 权限，也没被设为 Lake Formation 的数据湖管理员。我们需要先解决这个问题。
+
+1. 确认你的当前身份
+
+```bash
+aws sts get-caller-identity
+```
+
+记录下返回的 Arn，例如：arn:aws:iam::123456789012:user/your-admin-user。我们接下来会为这个身份授权。
+
+2. 赋予 IAM 权限
+
+创建一个策略文件，允许所有必要的 Lake Formation 操作。
+
+```bash
+cat > lakeformation-iam-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LakeFormationAllActions",
+      "Effect": "Allow",
+      "Action": [
+        "lakeformation:*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+```
+
+将这个策略附加到你的当前用户（假设身份是 IAM 用户，如果是角色请改用 put-role-policy）。
+
+```bash
+# 将 your-iam-user 替换为上一个命令中 Arn 的最后一段（例如 user/后面的名称）
+aws iam put-user-policy \
+    --user-name your-iam-user \
+    --policy-name LakeFormationFullAccess \
+    --policy-document file://lakeformation-iam-policy.json
+```
+
+3. 设为数据湖管理员
+
+现在在 Lake Formation 内部赋予自己管理员权限。
+
+```bash
+# 将 YOUR_ARN 替换为第一步获取的 Arn
+aws lakeformation put-data-lake-settings \
+    --data-lake-settings '{
+        "DataLakeAdmins": [
+            {"DataLakePrincipalIdentifier": "YOUR_ARN"}
+        ]
+    }'
+```
+
+现在再次尝试创建 LF-Tag，应该不会再报错了。
+
+---
+
+🧪 完整 Demo：从 0 到 1 的数据权限管理
+
+我们将模拟一个公司的数据湖，通过 LF-Tag（键值对） 和 LF-Tag 表达式 两种方式，对不同部门分析师的权限进行精细化控制。
+
+架构与角色总览
+
+角色 (Role) 授权方式 可访问的数据
+ConsumerAnalyst LF-Tag 键值对 仅 division=Consumer 的表
+CommercialAnalyst LF-Tag 键值对 仅 division=Commercial 的表
+PublicDataAnalyst LF-Tag 表达式 (AllPublic) 所有 confidentiality=Public 的表
+MaskedAnalyst Data Filter (命名资源) consumer_sales 表，但 customer_email 和 ssn 列被隐藏
+
+---
+
+📦 第一步：设置全局环境变量
+
+以下变量将在整个 Demo 中使用，请根据你的实际环境修改。
+
+```bash
+export AWS_ACCOUNT_ID="123456789012"          # 替换为你的账号ID
+export AWS_REGION="us-east-1"
+export S3_BUCKET="lf-demo-${AWS_ACCOUNT_ID}"  # S3桶名（需全局唯一）
+export GLUE_DB="sales_db"
+```
+
+---
+
+🧑‍🤝‍🧑 第二步：创建 IAM 角色（分析师身份）
+
+我们需要创建上面表格中的 5 个角色，并赋予它们 Athena 查询所需的 S3 和 Glue 权限。
+
+1. 创建信任策略文件
+这些角色需要被当前用户（或账号中的其他用户）代入，因此信任策略使用账户级别的 root 主体。
+
+```bash
+cat > trust-policy.json << EOF
+{
+  "Version": "2012-10-17",
+  "Statement": {
+    "Effect": "Allow",
+    "Principal": {
+      "AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:root"
+    },
+    "Action": "sts:AssumeRole"
+  }
+}
+EOF
+```
+
+2. 批量创建角色并附加基本策略
+
+```bash
+# 创建角色
+for role in DataAdmin ConsumerAnalyst CommercialAnalyst PublicDataAnalyst MaskedAnalyst; do
+  aws iam create-role --role-name $role --assume-role-policy-document file://trust-policy.json
+  # 附加 Athena 和 Glue 基本权限
+  aws iam attach-role-policy --role-name $role --policy-arn arn:aws:iam::aws:policy/AmazonAthenaFullAccess
+  aws iam attach-role-policy --role-name $role --policy-arn arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+done
+```
+
+3. 附加 S3 数据访问策略
+创建一个策略文件，允许所有角色读写本次 Demo 的 S3 桶。
+
+```bash
+cat > s3-access-policy.json << EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:ListBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::${S3_BUCKET}",
+                "arn:aws:s3:::${S3_BUCKET}/*"
+            ]
+        }
+    ]
+}
+EOF
+
+for role in DataAdmin ConsumerAnalyst CommercialAnalyst PublicDataAnalyst MaskedAnalyst; do
+  aws iam put-role-policy --role-name $role --policy-name S3Access --policy-document file://s3-access-policy.json
+done
+```
+
+4. 保存角色 ARN 备用
+
+```bash
+export DATA_ADMIN_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/DataAdmin"
+export CONSUMER_ANALYST_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/ConsumerAnalyst"
+export COMMERCIAL_ANALYST_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/CommercialAnalyst"
+export PUBLIC_DATA_ANALYST_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/PublicDataAnalyst"
+export MASKED_ANALYST_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/MaskedAnalyst"
+```
+
+---
+
+💾 第三步：准备 S3 数据和 Glue 表
+
+1. 创建 S3 桶并上传模拟数据
+
+```bash
+aws s3 mb s3://${S3_BUCKET} --region ${AWS_REGION}
+
+# 模拟 consumer 数据（含敏感列）
+cat > consumer_sales.csv << EOF
+order_id,amount,customer_name,customer_email,ssn,region
+1001,250,John Doe,john@example.com,123-45-6789,US
+1002,175,Jane Smith,jane@example.com,987-65-4321,EU
+EOF
+
+# 模拟 commercial 数据（含敏感列）
+cat > commercial_sales.csv << EOF
+order_id,amount,company_name,contact_email,ssn,region
+2001,5000,Acme Corp,contact@acme.com,111-22-3333,US
+2002,7500,Globex,contact@globex.com,444-55-6666,EU
+EOF
+
+aws s3 cp consumer_sales.csv s3://${S3_BUCKET}/consumer/
+aws s3 cp commercial_sales.csv s3://${S3_BUCKET}/commercial/
+```
+
+2. 创建 Glue 数据库和表
+
+```bash
+# 创建数据库
+aws glue create-database --database-input "{\"Name\": \"${GLUE_DB}\"}"
+
+# 创建 consumer_sales 表
+aws glue create-table \
+    --database-name ${GLUE_DB} \
+    --table-input '{
+        "Name": "consumer_sales",
+        "StorageDescriptor": {
+            "Columns": [
+                {"Name": "order_id", "Type": "string"},
+                {"Name": "amount", "Type": "double"},
+                {"Name": "customer_name", "Type": "string"},
+                {"Name": "customer_email", "Type": "string"},
+                {"Name": "ssn", "Type": "string"}
+            ],
+            "Location": "s3://'${S3_BUCKET}'/consumer/"
+        },
+        "PartitionKeys": [{"Name": "region", "Type": "string"}]
+    }'
+
+# 创建 commercial_sales 表
+aws glue create-table \
+    --database-name ${GLUE_DB} \
+    --table-input '{
+        "Name": "commercial_sales",
+        "StorageDescriptor": {
+            "Columns": [
+                {"Name": "order_id", "Type": "string"},
+                {"Name": "amount", "Type": "double"},
+                {"Name": "company_name", "Type": "string"},
+                {"Name": "contact_email", "Type": "string"},
+                {"Name": "ssn", "Type": "string"}
+            ],
+            "Location": "s3://'${S3_BUCKET}'/commercial/"
+        },
+        "PartitionKeys": [{"Name": "region", "Type": "string"}]
+    }'
+
+# 添加分区（数据在 US 和 EU 目录下）
+aws glue batch-create-partition \
+    --database-name ${GLUE_DB} \
+    --table-name consumer_sales \
+    --partition-input-list '[{"Values":["US"]}, {"Values":["EU"]}]'
+
+aws glue batch-create-partition \
+    --database-name ${GLUE_DB} \
+    --table-name commercial_sales \
+    --partition-input-list '[{"Values":["US"]}, {"Values":["EU"]}]'
+```
+
+3. 将 S3 数据位置注册到 Lake Formation
+这一步确保 Lake Formation 有权代表用户读取 S3 数据。
+
+```bash
+aws lakeformation register-resource \
+    --resource-arn "arn:aws:s3:::${S3_BUCKET}" \
+    --role-arn "${DATA_ADMIN_ARN}"
+```
+
+---
+
+🏷️ 第四步：创建 LF-Tag 并分配给表
+
+1. 创建两个 LF-Tag 键
+
+```bash
+# division 标签
+aws lakeformation create-lf-tag \
+    --tag-key "division" \
+    --tag-values "Consumer" "Commercial"
+
+# confidentiality 标签
+aws lakeformation create-lf-tag \
+    --tag-key "confidentiality" \
+    --tag-values "Public" "Confidential"
+```
+
+2. 将标签附加到对应的表
+
+```bash
+# consumer_sales → division=Consumer, confidentiality=Confidential
+aws lakeformation add-lf-tags-to-resource \
+    --resource '{"Table":{"DatabaseName":"'${GLUE_DB}'","Name":"consumer_sales"}}' \
+    --lf-tags '[{"TagKey":"division","TagValues":["Consumer"]},{"TagKey":"confidentiality","TagValues":["Confidential"]}]'
+
+# commercial_sales → division=Commercial, confidentiality=Public
+aws lakeformation add-lf-tags-to-resource \
+    --resource '{"Table":{"DatabaseName":"'${GLUE_DB}'","Name":"commercial_sales"}}' \
+    --lf-tags '[{"TagKey":"division","TagValues":["Commercial"]},{"TagKey":"confidentiality","TagValues":["Public"]}]'
+```
+
+---
+
+📌 第五步：方式一 —— 使用 LF-Tag 键值对直接授权
+
+这是最基础的用法，直接根据标签的键和值来授权。
+
+为 ConsumerAnalyst 授予 division=Consumer 的数据访问权
+
+```bash
+aws lakeformation grant-permissions \
+    --principal '{"DataLakePrincipalIdentifier":"'${CONSUMER_ANALYST_ARN}'"}' \
+    --resource '{"LFTag":{"CatalogId":"'${AWS_ACCOUNT_ID}'","TagKey":"division","TagValues":["Consumer"]}}' \
+    --permissions "SELECT" "DESCRIBE"
+```
+
+为 CommercialAnalyst 授予 division=Commercial 的数据访问权
+
+```bash
+aws lakeformation grant-permissions \
+    --principal '{"DataLakePrincipalIdentifier":"'${COMMERCIAL_ANALYST_ARN}'"}' \
+    --resource '{"LFTag":{"CatalogId":"'${AWS_ACCOUNT_ID}'","TagKey":"division","TagValues":["Commercial"]}}' \
+    --permissions "SELECT" "DESCRIBE"
+```
+
+特点：一对一匹配，规则简单。如果需要给多个值授权，需要多次调用。
+
+---
+
+✨ 第六步：方式二 —— 使用 LF-Tag 表达式授权
+
+表达式支持 AND 和 OR 逻辑，可以组合多个标签，并且可以保存为模板重复使用。
+
+1. 创建表达式
+
+```bash
+# ConsumerPublic：division=Consumer 且 confidentiality=Public
+aws lakeformation create-lf-tag-expression \
+    --name "ConsumerPublic" \
+    --catalog-id ${AWS_ACCOUNT_ID} \
+    --expression '{"Expression":[{"TagKey":"division","TagValues":["Consumer"]},{"TagKey":"confidentiality","TagValues":["Public"]}]}'
+
+# AllPublic：任何 division 下，confidentiality=Public 的数据
+aws lakeformation create-lf-tag-expression \
+    --name "AllPublic" \
+    --catalog-id ${AWS_ACCOUNT_ID} \
+    --expression '{"Expression":[{"TagKey":"confidentiality","TagValues":["Public"]}]}'
+```
+
+2. 使用表达式向 PublicDataAnalyst 授权
+
+这里我们授权 AllPublic，意味着该角色可以访问所有标记为 confidentiality=Public 的表（即本 Demo 中的 commercial_sales）。
+
+```bash
+aws lakeformation grant-permissions \
+    --principal '{"DataLakePrincipalIdentifier":"'${PUBLIC_DATA_ANALYST_ARN}'"}' \
+    --resource '{"LFTagExpression":{"CatalogId":"'${AWS_ACCOUNT_ID}'","Name":"AllPublic"}}' \
+    --permissions "SELECT" "DESCRIBE"
+```
+
+特点：
+
+· 灵活：一次授权覆盖多个标签值；
+· 可复用：表达式 AllPublic 可以授予多个不同的角色；
+· 集中管理：以后如果 confidentiality=Public 的定义变了，只需修改表达式，所有引用该表达式的策略会同步更新。
+
+---
+
+🔒 第七步：列级权限控制（Data Filter）
+
+LF-Tag 本身无法实现列级屏蔽。我们需要使用 数据单元格过滤器 (Data Cells Filter) 配合 命名资源 来隐藏敏感列。
+
+1. 创建过滤器
+为 consumer_sales 表创建一个过滤器，排除 customer_email 和 ssn 列。
+
+```bash
+aws lakeformation create-data-cells-filter \
+    --table-data '{
+        "DatabaseName": "'${GLUE_DB}'",
+        "Name": "consumer_sales",
+        "TableCatalogId": "'${AWS_ACCOUNT_ID}'",
+        "ColumnWildcard": {
+            "ExcludedColumnNames": ["customer_email", "ssn"]
+        }
+    }' \
+    --name "MaskSensitiveColumns"
+```
+
+2. 通过命名资源向 MaskedAnalyst 授权
+过滤器必须通过 TableWithColumns 命名资源来挂载。
+
+```bash
+aws lakeformation grant-permissions \
+    --principal '{"DataLakePrincipalIdentifier":"'${MASKED_ANALYST_ARN}'"}' \
+    --resource '{
+        "TableWithColumns": {
+            "DatabaseName": "'${GLUE_DB}'",
+            "Name": "consumer_sales",
+            "ColumnWildcard": {},
+            "DataCellsFilter": {
+                "TableCatalogId": "'${AWS_ACCOUNT_ID}'",
+                "Name": "MaskSensitiveColumns"
+            }
+        }
+    }' \
+    --permissions "SELECT" "DESCRIBE"
+```
+
+结果：MaskedAnalyst 可以查询 consumer_sales，但返回结果中不会出现 customer_email 和 ssn 两列。
+
+---
+
+🧪 第八步：在 Athena 中验证权限
+
+你可以通过 AWS 控制台或 CLI 代入不同角色来验证。
+
+快速验证方法（使用 CLI 获取临时凭证）
+
+以 ConsumerAnalyst 为例：
+
+```bash
+# 获取临时凭证
+export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s" \
+$(aws sts assume-role \
+    --role-arn "${CONSUMER_ANALYST_ARN}" \
+    --role-session-name "TestSession" \
+    --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" \
+    --output text))
+```
+
+然后启动 Athena 查询：
+
+```bash
+# 应该成功
+aws athena start-query-execution \
+    --query-string "SELECT * FROM \"${GLUE_DB}\".consumer_sales limit 5" \
+    --result-configuration "OutputLocation=s3://${S3_BUCKET}/athena-results/"
+
+# 应该被拒绝
+aws athena start-query-execution \
+    --query-string "SELECT * FROM \"${GLUE_DB}\".commercial_sales limit 5" \
+    --result-configuration "OutputLocation=s3://${S3_BUCKET}/athena-results/"
+```
+
+你也可以登录 Athena 控制台，通过右上角的“切换角色”功能，分别代入这些角色进行交叉查询。预期行为如下：
+
+角色 SELECT * FROM consumer_sales SELECT * FROM commercial_sales
+ConsumerAnalyst ✅ 成功 ❌ 拒绝
+CommercialAnalyst ❌ 拒绝 ✅ 成功
+PublicDataAnalyst ❌ 拒绝（因为它不是 Public） ✅ 成功
+MaskedAnalyst ✅ 成功（但无 email, ssn 列） ❌ 拒绝（未授权）
+
+---
+
+🧹 第九步：清理资源（避免费用）
+
+```bash
+# 1. 删除 S3 数据
+aws s3 rm s3://${S3_BUCKET} --recursive
+aws s3 rb s3://${S3_BUCKET}
+
+# 2. 删除 Glue 元数据
+aws glue delete-table --database-name ${GLUE_DB} --name consumer_sales
+aws glue delete-table --database-name ${GLUE_DB} --name commercial_sales
+aws glue delete-database --name ${GLUE_DB}
+
+# 3. 删除 LF-Tag（会同时解除所有分配）
+aws lakeformation delete-lf-tag --tag-key division
+aws lakeformation delete-lf-tag --tag-key confidentiality
+
+# 4. 删除 IAM 角色
+for role in DataAdmin ConsumerAnalyst CommercialAnalyst PublicDataAnalyst MaskedAnalyst; do
+  # 先分离策略
+  aws iam detach-role-policy --role-name $role --policy-arn arn:aws:iam::aws:policy/AmazonAthenaFullAccess
+  aws iam detach-role-policy --role-name $role --policy-arn arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+  aws iam delete-role-policy --role-name $role --policy-name S3Access
+  aws iam delete-role --role-name $role
+done
+
+# 5. 删除本地临时文件
+rm -f trust-policy.json s3-access-policy.json consumer_sales.csv commercial_sales.csv lakeformation-iam-policy.json
+```
+
+---
+
+💡 核心区别总结
+
+对比维度 LF-Tag 键值对授权 LF-Tag 表达式授权
+原理 直接基于一个或多个键值对匹配 预定义由 AND/OR 组合的逻辑规则
+灵活性 简单，一次只能匹配一组值 高，支持跨键的 AND 逻辑，同键的 OR 逻辑
+复用性 无，每次授权都要重复指定键值对 强，一个表达式可被多个策略引用
+维护性 规则分散，修改需要逐个授权策略更新 集中管理，修改表达式即可影响所有引用该表达式的策略
+适用场景 固定、简单的部门隔离，例如“消费者部门只看消费者数据” 动态、复杂的规则，例如“所有公开数据”，或需要未来调整的规则
+
+现在你已经拥有了一套完整、可运行的企业级数据权限管理 Demo。如果在执行中还有其他报错，可以随时反馈给我！
