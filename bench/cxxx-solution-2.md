@@ -1,122 +1,140 @@
-明白了。您是想评估 **“自研 IDE + 其内置模型”** 这个端到端系统的代码修复能力，而不是仅仅评估模型本身。SWE‑bench 本质上是一个 **模型评估基准**，但完全可以用它来评测一个包含 IDE 交互、模型推理、甚至人工辅助的系统。
+明白了，你的需求就是像 Codex / Claude Code 那样，**把自己的 Agent CLI + 它自己的模型**作为一个独立的“已安装代理”接入 Terminal-Bench 进行官方认可的测试。
 
-下面我将您的需求梳理成一个可落地的技术方案，并以 Markdown 格式呈现。
+以下是根据这一需求整理的 Markdown 文档。
 
----
+```markdown
+# 将自研 Agent CLI 作为“已安装代理”接入 Terminal-Bench 的需求文档
 
-## 需求梳理：使用 SWE‑bench_Pro 评估“自研 IDE + 内置模型”
+## 1. 测试目标
+- **测试对象**：自研的本地 Agent CLI 工具 + 该工具内置或调用的语言模型（如 Claude、GPT、本地模型等）。
+- **测试平台**：[Terminal-Bench](https://github.com/harbor-framework/terminal-bench)
+- **集成方式**：遵循 Terminal-Bench 定义的 **“已安装代理（Installed Agent）”** 规范，使自研 Agent CLI 能够像官方支持的 `claude-code`、`codex` 一样，在 Docker 容器内被自动安装、执行，并完成真实终端任务的评估。
 
-### 1. 目标
+## 2. 集成原理
+Terminal-Bench 框架提供了 `AbstractInstalledAgent` 抽象基类。通过实现该接口，可以将任何**命令行形式的代理工具**（如 `claude-code`、`your-agent`）封装成一个可被框架识别的插件。
 
-评测一个**集成了大语言模型的 IDE**（例如类似 Cursor、GitHub Copilot 的智能 IDE，或者您自研的具备代码理解/生成能力的开发环境）在实际软件工程问题中的端到端修复能力。
+- 框架负责：拉取任务对应的 Docker 镜像、启动容器、准备环境变量、调用你实现的适配器。
+- 你的适配器负责：在容器内安装 Agent CLI、执行任务、返回执行结果。
+- 测试结果仅取决于你的 Agent CLI 在容器内的实际表现，**不涉及 `terminus` 代理**。
 
-评测指标与 SWE‑bench 标准一致：**能否生成正确的补丁**，使得原本失败的单元测试（FAIL_TO_PASS）变为通过，同时不破坏已有的通过测试（PASS_TO_PASS）。
+## 3. 适配器实现要求
 
-### 2. 核心原则
+### 3.1 安装脚本 (`setup.sh`)
+你需要提供一个 Shell 脚本，用于在干净的 Docker 容器内安装你的 Agent CLI。该脚本应：
 
-- **评估框架不变**：仍使用官方 SWE‑bench 的 Docker 环境、测试逻辑和评分脚本。
-- **替换模型调用层**：不使用 SWE‑agent 或 API 自动调用，而是**人工在 IDE 中操作**，最终产出一个 `model_patch`。
-- **严格隔离**：所有代码浏览、修改、调试都必须**在对应任务的 Docker 容器内**进行，以保证环境与评估时完全一致。
+- **可独立运行**，不依赖容器内未预装的工具（但可以安装必要依赖，如 `curl`、`unzip`）。
+- **安装完成后**，确保 `your-agent` 命令可以在容器的 `PATH` 中找到。
+- **错误处理**：使用 `set -e` 或在每个关键步骤后检查返回值。
 
-### 3. 整体流程（5 个阶段）
-
-#### 阶段 1：环境准备
-
-- 克隆 SWE‑bench_Pro 离线数据集（已有）。
-- 安装 `swebench`、`datasets` 等依赖（建议使用虚拟环境）。
-- 确保 Docker Desktop 运行，且分配足够内存（≥8GB）。
-
-#### 阶段 2：导出待测任务列表并准备容器
-
+示例脚本框架：
 ```bash
-# 从数据集中提取所有 instance_id，或者只选一个子集（如 Lite）
-python helper_code/extract_gold_patches.py \
-    --dataset_path /path/to/dataset \
-    --output_dir ./my_ide_eval
+#!/bin/bash
+set -e
+
+# 安装必要系统依赖
+apt-get update && apt-get install -y curl
+
+# 下载并安装你的 Agent 二进制文件
+curl -L https://your.domain/downloads/latest/your-agent -o /usr/local/bin/your-agent
+chmod +x /usr/local/bin/your-agent
+
+echo "Your Agent installed successfully"
 ```
 
-对每个想要评测的 `instance_id`：
+### 3.2 Python 适配器类
+创建一个 Python 文件（例如 `your_agent_adapter.py`），继承 `AbstractInstalledAgent` 并实现以下关键成员：
 
+| 方法/属性 | 作用 | 必需 |
+| :--- | :--- | :--- |
+| `name() -> AgentName` | 返回唯一的 Agent 标识符，如 `AgentName("your-agent")` | ✅ |
+| `_install_agent_script_path -> Path` | 返回 `setup.sh` 的本地文件路径 | ✅ |
+| `_run_agent_commands() -> list[TerminalCommand]` | 返回在容器内启动 Agent 并执行任务的命令列表 | ✅ |
+| `_env -> dict[str, str]` | 设置容器内的环境变量（如 API Key、代理配置） | 强烈推荐 |
+| `_timeout_multiplier -> float` | 可选，增大任务超时倍数（如果你的 Agent 需要更长思考时间） | 可选 |
+
+**示例实现**：
 ```python
-from swebench.harness.docker_build import build_instance_image
+from pathlib import Path
+from terminal_bench.agents.installed_agents.abstract_installed_agent import AbstractInstalledAgent
+from terminal_bench.agents.agent_types import AgentName
+from terminal_bench.agents.terminal_command import TerminalCommand
 
-image_tag = build_instance_image(instance_id)
-# 启动容器，并挂载 IDE 工作目录（如果需要）
-docker run -it -v /path/to/ide/workspace:/workspace --name ide_$instance_id $image_tag bash
+class YourAgentAdapter(AbstractInstalledAgent):
+
+    @staticmethod
+    def name() -> AgentName:
+        return AgentName("your-agent")
+
+    @property
+    def _install_agent_script_path(self) -> Path:
+        return Path(__file__).parent / "setup.sh"
+
+    def _run_agent_commands(self) -> list[TerminalCommand]:
+        # 假设你的 Agent 接受任务描述作为命令行参数，并自动完成任务后退出
+        return [
+            TerminalCommand(
+                command=f"your-agent solve '{self.task.instruction}'",
+                is_blocking=True
+            )
+        ]
+
+    @property
+    def _env(self) -> dict[str, str]:
+        # 将宿主机的 API 密钥等传入容器
+        return {
+            "OPENAI_API_KEY": self._api_key,   # 根据你的模型修改
+            "YOUR_AGENT_HOME": "/tmp/your-agent"
+        }
 ```
 
-#### 阶段 3：在 IDE 中完成人工辅助的代码修复
+## 4. 运行测试命令
 
-- **容器内操作**：所有代码修改必须在容器内的 `/testbed/` 目录中进行。
-- **IDE 集成方式**（任选一种）：
-  - **方式 A（完全人工）**：开发者在 IDE 中阅读 `problem_statement`，手动编写补丁 → 记录模型能力较弱，仅测试 IDE 本身。
-  - **方式 B（模型辅助）**：IDE 内置模型根据问题描述和代码上下文**自动生成建议补丁**，开发者可接受/修改 → 评估“IDE + 模型”协同效果。
-  - **方式 C（半自动）**：IDE 直接调用模型生成补丁，开发者只负责触发和确认。
-- **生成补丁**：修改完成后，在容器内执行：
-  ```bash
-  git diff > /workspace/fix_${instance_id}.patch
-  ```
-- **导出补丁**：`docker cp` 到宿主机上的统一目录（如 `./patches/`）。
-
-#### 阶段 4：收集补丁并生成预测文件
-
-使用官方 `gather_patches.py`（或手动编写脚本）将所有 `.patch` 文件转换为单个 `predictions.jsonl`：
+完成适配器代码后，使用 `--agent-import-path` 运行：
 
 ```bash
-python helper_code/gather_patches.py \
-    --patch_dir ./patches \
-    --output predictions.jsonl
+tb run \
+  --dataset terminal-bench-core==0.1.1 \
+  --agent-import-path your_agent_adapter:YourAgentAdapter \
+  --task-id blind-maze-explorer-5x5
 ```
 
-每行的格式为：
-```json
-{"instance_id": "owner__repo-123", "model_name_or_path": "my_ide_model", "model_patch": "diff --git ..."}
+- `--agent-import-path` 格式为 `模块名:类名`。
+- 可以替换 `--task-id` 为其他任务，或使用 `--all` 运行全量测试（不推荐首次使用）。
+
+## 5. 测试结果的意义
+
+- **评估对象**：你的 **Agent CLI + 它调用的模型** 组合，是一个端到端的完整智能体。
+- **结果的可比性**：由于你的 Agent 被视作第三方工具，其得分不会出现在官方 `terminus` 排行榜上。但你可以：
+  - 与官方已测试的 `claude-code`、`codex` 等工具的成绩进行横向对比（前提是任务一致、环境相同）。
+  - 用于内部迭代，量化每次 Agent 改进带来的性能变化。
+- **可重复性**：完整的 Docker 环境确保测试结果在不同机器上可复现。
+
+## 6. 验证与调试建议
+
+1. **本地小范围测试**：在非容器环境中先用 `your-agent solve "some simple task"` 验证 CLI 本身工作正常。
+2. **单任务快速验证**：选择最简单的任务（如 `hello-world`）运行，确认 Docker 能正常安装并执行。
+3. **查看详细日志**：运行时可加 `--verbose` 参数，检查容器内安装和执行的输出。
+4. **环境变量传递**：确保 API Key 等敏感信息不被硬编码，通过 `_env` 动态传递。
+
+## 7. 参考资料
+
+- Terminal-Bench GitHub：[harbor-framework/terminal-bench](https://github.com/harbor-framework/terminal-bench)
+- 内置已安装代理示例：查看 `terminal_bench/agents/installed_agents/claude_code_agent.py` 和 `codex_agent.py`
+- 抽象基类定义：`terminal_bench/agents/installed_agents/abstract_installed_agent.py`
+
+## 8. 附录：与传统 “terminus” 测试的对比
+
+| 项目 | 使用 `terminus` | 使用你的 Installed Agent |
+| :--- | :--- | :--- |
+| 被测试对象 | 纯语言模型（通过 API） | 你的 Agent CLI + 其内部模型 |
+| 是否需要适配器 | 不需要 | 需要 |
+| 是否可对比官方榜单 | 是 | 否（仅可自比或与同类工具比） |
+| 测试成本 | API 调用费用 | API 调用费用 + 容器执行时间 |
+| 适合场景 | 模型能力基准测试 | Agent 产品化、工程优化评估 |
+
+> **版本**：1.0  
+> **最后更新**：2026-06-09  
+> **目标用户**：希望将自己的智能体 CLI 接入 Terminal-Bench 进行端到端性能评估的开发者
 ```
 
-#### 阶段 5：运行官方评估
-
-**先验证黄金补丁**（可选但推荐）：
-```bash
-python -m swebench.harness.run_evaluation \
-    --dataset_name /path/to/dataset \
-    --predictions_path gold \
-    --run_id validate_gold
-```
-
-**再评估您的补丁**：
-```bash
-python -m swebench.harness.run_evaluation \
-    --dataset_name /path/to/dataset \
-    --predictions_path ./predictions.jsonl \
-    --run_id my_ide_eval \
-    --max_workers 1   # 人工操作一般一次一个实例，避免资源冲突
-```
-
-查看结果：`logs/swebench/my_ide_eval/report.json` 中的 `resolved` 字段即为通过率。
-
-### 4. 关键实现细节
-
-| 需求点 | 实现方式 |
-|--------|----------|
-| IDE 如何访问容器内的代码 | 将容器内的 `/testbed/` 映射到宿主机目录（`-v`），然后 IDE 打开该宿主机目录。注意文件权限。 |
-| 模型如何调用 | IDE 后端直接调用本地/云端模型 API，输入 `problem_statement` 和当前代码上下文。 |
-| 调试与测试 | 可在容器内手动运行 pytest 来验证 `FAIL_TO_PASS` 中的测试是否通过。 |
-| 可重复性 | 每个容器独立，基线与数据集给定的 `base_commit` 保持一致。 |
-| 评估指标 | 官方报告会给出 `resolved`（正确修复数 / 总任务数）。 |
-
-### 5. 可选扩展
-
-- **批量评估**：若 IDE 支持完全自动化（例如插件监听 issue 并自动修复），可设置 `--max_workers > 1` 并发运行多个容器。
-- **记录决策过程**：记录 IDE 生成的原始补丁、人工修改后的补丁，分析模型贡献度。
-- **对比实验**：用同一组任务评测“仅模型（无 IDE 交互）”与“IDE+模型”，量化 IDE 带来的提升。
-
-### 6. 注意事项
-
-- **Docker 资源**：同时运行多个容器会消耗大量内存/CPU，建议根据硬件逐步增加并发。
-- **测试超时**：某些测试执行时间较长，可在 `run_evaluation` 中设置 `--timeout`。
-- **补丁格式**：`model_patch` 必须是 **unified diff** 格式，可使用 `git diff` 生成。
-- **环境一致性**：务必保证 IDE 内的 Python 解释器、依赖版本与容器内一致（可直接使用容器内的 Python）。
-
----
-
-如果您需要更具体的某个脚本示例（例如如何自动从 IDE 收集补丁并生成 JSONL），我可以进一步提供代码片段。
+这份文档直接对应你的真实需求：将自研 Agent + 模型视为一个整体，作为“已安装代理”接入官方测试体系。如果需要进一步细化某一部分（比如环境变量安全传递、多命令执行时序等），我可以继续补充。
