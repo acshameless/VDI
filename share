@@ -1,7 +1,6 @@
 对抗协作闭环：多Agent生成评估与大数据智能交互
 
 
-loop agent
 
 1. 生成对抗评估
 - 后训练 
@@ -28,6 +27,9 @@ loop agent
 - BFS/DFS
 - 
 
+闭环
+- github issue -> github action -> Agent(code review[ui/ue/security/performance/test/arch/...]/coding/validator ) -> PR -> github action -> Merge
+- high level 产品 raft
 
 
 3. 大数据
@@ -41,6 +43,9 @@ loop agent
 
 
 4. 案例
+- 生成对抗评估 用于 大数据智能
+- 多 agent 用于 大数据智能
+
 - 结构化数据场景：Text-to-SQL、数据分析Agent
 - 非结构数据场景：企业知识库问答
 
