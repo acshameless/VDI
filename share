@@ -1,1 +1,41 @@
 对抗协作闭环：多Agent生成评估与大数据智能交互
+
+
+
+
+1. 生成对抗评估
+- 后训练 
+- yueyang 博士 agent swarm 训练
+- GAN、扩散模型
+
+
+2. 多 agent
+- LLM 模型窗口不够
+- agent 记忆
+- tool 问题
+- 效率
+- 信息不够，知识受限
+- 迭代速度
+
+- 成本：多个小模型
+- agent memory
+
+
+- MARS-SQL
+- ReViSQL
+
+- MCTS
+- BFS/DFS
+- 
+
+
+
+3. 大数据
+- 数据质量问题
+- 数据合成
+
+
+- 蒸馏
+- 确定提升模型能力
+
+
