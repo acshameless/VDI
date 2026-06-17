@@ -8,6 +8,22 @@
 - GAN、扩散模型
 
 
+Observation: Distilled model consistently outperforms base model as k goes large
+➢ Distillation expands reasoning by injecting new knowledge and reasoning patterns
+
+
+Data&Train Loop w.
+human effort
+
+
+Data&Train Loop
+driven by LLM Agents (self-play)
+
+
+Reinforced self-play reasoning 
+Progressively shifting frontier training pipelines toward LLM-driven data generation
+
+
 what
 Current RLVR primarily amplifies patterns from pretraining
 rather than expanding the reasoning boundary.[1]
