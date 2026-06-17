@@ -8,6 +8,38 @@
 - GAN、扩散模型
 
 
+what
+Current RLVR primarily amplifies patterns from pretraining
+rather than expanding the reasoning boundary.[1]
+
+why
+Inability to effectively explore the vast action space with
+solely outcome-based feedback
+
+how
+Scale up RL data by self-play
+- Self-play generates its own data [2]
+
+how
+Evolution-based RLVR
+- Explore by response evolution [3]
+
+
+[1] Yang Yue, et al. "Does Reinforcement Learning Really Incentivize Reasoning Capacity in LLMs Beyond the Base Model?" NeurIPS 2025 Best Paper Runner-up Award.
+[2] Andrew Zhao, Yiran Wu, Yang Yue, et al. "Absolute Zero: Reinforced Self-play Reasoning with Zero Data." NeurIPS 2025 Spotlight.
+[3] Yang Yue, et al. “Evolution-based Exploration Mechanism for RLVR.” Ongoing Project.
+
+
+In this way, the agent swarm evolves toward a company-like structure and easy to
+scale the depth and width of the system.
+
+
+3. Partial mixture of Agent (MoA)
+➢ Prompt to Lauch MoA at high uncertainty steps
+➢ Especially solving the same task from different perspectives/solution
+paths
+
+
 2. 多 agent
 - LLM 模型窗口不够
 - agent 记忆
