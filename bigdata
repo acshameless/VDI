@@ -1,0 +1,102 @@
+- Meltano
+- Singer
+- Airflow
+- OpenDAL
+- Iceberg
+- MinIO/S3
+- Trino
+- dbt
+- dbt Tests
+Option: Great Expectations/Soda Core
+- OpenMetadata
+- OpenLineage
+- Marquez
+- Superset
+- GitHub Actions
+
+
+
+统一元数据模型 + 治理规则模型（Policy Model）
+- 图数据库
+
+
+- Keycloak
+- Ranger
+- OpenSearch ???
+
+
+
+
+cube yuy
+
+数据资产（Data Asset）
+- Ownership Owner/Steward/Maintainer
+- Domain 数据领域
+- Cost 成本治理
+
+Data Asset Management Platform
+
+
+1. Metadata Center（元数据中心）
+2. Lineage Center（血缘中心）
+3. Policy Center（策略中心）
+4. Quality Center（质量中心）
+5. Access Center（权限中心）
+6. Audit Center（审计中心）
+7. Catalog Center（数据资产目录）
+
+
+
+Governance as Code 所有治理规则放 Git, PR 审核治理变更。
+
+AI Governance Assistant
+
+Impact Analysis
+- Contract 数据合同。
+
+
+Business Layer
+- Catalog  
+- Search
+- Dashboard
+
+Governance Layer 
+- Policy                 
+- Lineage               
+- Quality               
+- Audit                 
+
+Metadata Layer          
+- Dataset                 
+- Column                  
+- Pipeline                
+- Domain                  
+
+Data Layer              
+- Iceberg                 
+- Warehouse               
+- Lake                    
+
+
+
+
+- Iceberg                 
+- OpenDAL
+- S3
+
+- Trino
+- Meltano
+- Singer
+- dbt
+- Great Expectations
+- OpenMetadata PostgreSQL
+- OpenSearch
+- Open Policy Agent
+- OpenLineage
+- Keycloak
+- Ranger
+- OpenMetadata
+- Superset
+- Airflow
+- Github Action
+
