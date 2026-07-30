@@ -1,0 +1,1415 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Agentic Analytics Workshop (CloudLab Production) - Pre-provisioned Environment
+  Deploys data lake (S3 + Glue Catalog + Athena) + EC2 dev instance + IAM roles
+  Auto-provisions: data copy, partition repair, Iceberg table, S3 Vectors index
+  Region: us-west-2
+  Uses CloudLab auto-injected parameters: CloudLabAssetBucket, CloudLabAssetPrefix
+
+Parameters:
+  CloudLabAssetBucket:
+    Type: String
+    Default: cloudlab-assets-prod-pdx
+  CloudLabAssetPrefix:
+    Type: String
+    Default: a26d065d-3f84-4948-a6ee-001aa5e69ac4
+  CloudLabMasterAccountId:
+    Type: String
+    Default: '976193244280'
+  CloudLabRegion:
+    Type: String
+    Default: us-west-2
+
+  # CloudLabAssetBucket, CloudLabAssetPrefix, CloudLabMasterAccountId, CloudLabRegion
+  # are auto-injected by CloudLab ? do NOT declare them here.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 AMI
+
+Resources:
+
+  # ============================================================
+  # TrialUseOnlyRole (CloudLab required - DO NOT modify RoleName or Trust)
+  # ============================================================
+  TrialUseOnlyRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      RoleName: TrialUseOnly-ContentGeneratedByGenAIDoesNotRepresentViewsOfAWS
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudlabDelegateAssumeThisRole
+            Effect: Allow
+            Principal:
+              AWS:
+                - arn:aws:iam::976193244280:root
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: TrialUseOnlyRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # ---- Athena Console (Lab 1) ----
+              - Sid: AthenaAccess
+                Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:GetQueryRuntimeStatistics
+                  - athena:BatchGetQueryExecution
+                  - athena:ListWorkGroups
+                  - athena:GetWorkGroup
+                  - athena:ListDatabases
+                  - athena:ListTableMetadata
+                  - athena:GetTableMetadata
+                  - athena:ListDataCatalogs
+                  - athena:ListQueryExecutions
+                Resource: "*"
+
+              # ---- Glue Catalog Read (Lab 1) ----
+              - Sid: GlueCatalogRead
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetPartitions
+                  - glue:GetPartition
+                  - glue:SearchTables
+                Resource: "*"
+
+              # ---- S3 Data Access (data + results buckets) ----
+              - Sid: S3DataAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                Resource:
+                  - !GetAtt WorkshopDataBucket.Arn
+                  - !Sub "${WorkshopDataBucket.Arn}/*"
+                  - !GetAtt AthenaResultsBucket.Arn
+                  - !Sub "${AthenaResultsBucket.Arn}/*"
+                  - "*"
+
+              # ---- S3 Vectors (Lab 1 Step 4 - read + query only) ----
+              - Sid: S3VectorsRead
+                Effect: Allow
+                Action:
+                  - s3vectors:ListVectorBuckets
+                  - s3vectors:GetVectorBucket
+                  - s3vectors:ListIndexes
+                  - s3vectors:GetIndex
+                  - s3vectors:ListVectors
+                  - s3vectors:GetVectors
+                  - s3vectors:QueryVectors
+                Resource: "*"
+
+              # ---- Bedrock Model Invoke (Lab 1 verify + Lab 4 local) ----
+              - Sid: BedrockInvoke
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - "arn:aws:bedrock:*::foundation-model/amazon.nova-*"
+
+              # ---- EC2 Instance Connect + SSM Session Manager ----
+              - Sid: EC2ConnectAndSSM
+                Effect: Allow
+                Action:
+                  - ec2-instance-connect:SendSSHPublicKey
+                  - ec2:Describe*
+                  - ssm:StartSession
+                  - ssm:TerminateSession
+                  - ssm:ResumeSession
+                  - ssm:DescribeSessions
+                  - ssm:GetConnectionStatus
+                Resource: "*"
+
+              # ---- CloudShell ----
+              - Sid: CloudShellAccess
+                Effect: Allow
+                Action:
+                  - cloudshell:CreateEnvironment
+                  - cloudshell:GetEnvironmentStatus
+                  - cloudshell:StartEnvironment
+                  - cloudshell:PutCredentials
+                  - cloudshell:CreateSession
+                  - cloudshell:GetFileDownloadUrls
+                  - cloudshell:GetFileUploadUrls
+                Resource: "*"
+
+              # ---- CloudFormation Outputs ----
+              - Sid: CloudFormationRead
+                Effect: Allow
+                Action:
+                  - cloudformation:Describe*
+                  - cloudformation:List*
+                  - cloudformation:Get*
+                Resource: "*"
+
+              # ---- SSM Parameters ----
+              - Sid: SSMParameterRead
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:DescribeParameters
+                Resource: "*"
+
+              # ---- AgentCore Read-Only (verify Lab 2 deployment) ----
+              - Sid: AgentCoreRead
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:Get*
+                  - bedrock-agentcore:List*
+                Resource: "*"
+
+              # ---- CloudWatch Logs Read-Only ----
+              - Sid: CloudWatchLogsRead
+                Effect: Allow
+                Action:
+                  - logs:Describe*
+                  - logs:Get*
+                  - logs:List*
+                  - logs:FilterLogEvents
+                  - logs:StartQuery
+                  - logs:StopQuery
+                  - logs:GetQueryResults
+                Resource: "*"
+
+              # ---- Cognito Read-Only (view Lab 2 pools) ----
+              - Sid: CognitoRead
+                Effect: Allow
+                Action:
+                  - cognito-idp:Describe*
+                  - cognito-idp:List*
+                  - cognito-idp:Get*
+                Resource: "*"
+
+              # ---- IAM Read-Only ----
+              - Sid: IAMRead
+                Effect: Allow
+                Action:
+                  - iam:Get*
+                  - iam:List*
+                Resource: "*"
+
+  # ============================================================
+  # S3 Storage Layer
+  # ============================================================
+  WorkshopDataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "workshop-data-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Suspended
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupAfterWorkshop
+            Status: Enabled
+            ExpirationInDays: 7
+
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "athena-results-${AWS::AccountId}-${AWS::Region}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupResults
+            Status: Enabled
+            ExpirationInDays: 1
+
+  # ============================================================
+  # Lake Formation Settings (IAM mode for Iceberg compatibility)
+  # ============================================================
+  LakeFormationSettings:
+    Type: AWS::LakeFormation::DataLakeSettings
+    Properties:
+      Admins: []
+      CreateDatabaseDefaultPermissions:
+        - Principal:
+            DataLakePrincipalIdentifier: IAM_ALLOWED_PRINCIPALS
+          Permissions:
+            - ALL
+      CreateTableDefaultPermissions:
+        - Principal:
+            DataLakePrincipalIdentifier: IAM_ALLOWED_PRINCIPALS
+          Permissions:
+            - ALL
+
+  # ============================================================
+  # Glue Catalog - Database Definitions
+  # ============================================================
+  TransactionsDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: transactions_db
+        Description: Payment transactions data lake (Parquet)
+
+  CustomersDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: customers_db
+        Description: Customer profiles (Iceberg)
+
+  # ============================================================
+  # Glue Catalog - Table Definitions
+  # ============================================================
+  PaymentTransactionsTable:
+    Type: AWS::Glue::Table
+    DependsOn: TransactionsDatabase
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: transactions_db
+      TableInput:
+        Name: payment_transactions
+        Description: Payment transaction records partitioned by year/month
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+          EXTERNAL: "TRUE"
+        StorageDescriptor:
+          Location: !Sub "s3://${WorkshopDataBucket}/parquet/payment_transactions/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - Name: transaction_id
+              Type: string
+            - Name: customer_id
+              Type: string
+            - Name: transaction_timestamp
+              Type: timestamp
+            - Name: transaction_amount
+              Type: double
+            - Name: currency
+              Type: string
+            - Name: payment_method
+              Type: string
+            - Name: transaction_status
+              Type: string
+            - Name: merchant_id
+              Type: string
+            - Name: merchant_name
+              Type: string
+            - Name: product_category
+              Type: string
+            - Name: product_purchased
+              Type: string
+            - Name: risk_score
+              Type: double
+            - Name: device_type
+              Type: string
+            - Name: ip_country
+              Type: string
+            - Name: ip_city
+              Type: string
+        PartitionKeys:
+          - Name: year
+            Type: int
+          - Name: month
+            Type: string
+
+  CustomerProfilesSourceTable:
+    Type: AWS::Glue::Table
+    DependsOn: CustomersDatabase
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: customers_db
+      TableInput:
+        Name: customer_profiles_source
+        Description: Customer profiles source (Parquet) - used to populate Iceberg table
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+          EXTERNAL: "TRUE"
+        StorageDescriptor:
+          Location: !Sub "s3://${WorkshopDataBucket}/iceberg_source/customer_profiles/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - Name: customer_id
+              Type: string
+            - Name: customer_name
+              Type: string
+            - Name: email
+              Type: string
+            - Name: phone
+              Type: string
+            - Name: gender
+              Type: string
+            - Name: age_group
+              Type: string
+            - Name: province
+              Type: string
+            - Name: city
+              Type: string
+            - Name: registration_date
+              Type: string
+            - Name: customer_tier
+              Type: string
+            - Name: return_rate
+              Type: double
+            - Name: lifetime_value
+              Type: double
+            - Name: total_orders
+              Type: int
+            - Name: total_spend
+              Type: double
+            - Name: dispute_count
+              Type: int
+            - Name: preferred_category
+              Type: string
+            - Name: preferred_payment
+              Type: string
+            - Name: last_active_date
+              Type: string
+            - Name: account_status
+              Type: string
+            - Name: credit_score
+              Type: int
+
+  # ============================================================
+  # Athena Workgroup
+  # ============================================================
+  WorkshopAthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: workshop-workgroup
+      Description: Workshop Athena workgroup with pre-configured output
+      State: ENABLED
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${AthenaResultsBucket}/results/"
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: false
+        BytesScannedCutoffPerQuery: 1073741824
+
+  # ============================================================
+  # IAM - Lambda Execution Role (for all Custom Resource Lambdas)
+  # ============================================================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: workshop-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: WorkshopLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3 read from Assets bucket (CloudLab auto-injected)
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                Resource:
+                  - !Sub "arn:aws:s3:::${CloudLabAssetBucket}"
+                  - !Sub "arn:aws:s3:::${CloudLabAssetBucket}/*"
+              # S3 read/write to Workshop bucket + Athena results
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !GetAtt WorkshopDataBucket.Arn
+                  - !Sub "${WorkshopDataBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt AthenaResultsBucket.Arn
+                  - !Sub "${AthenaResultsBucket.Arn}/*"
+              # Athena for Iceberg DDL/DML
+              - Effect: Allow
+                Action:
+                  - athena:Get*
+                  - athena:List*
+                  - athena:StartQueryExecution
+                Resource: "*"
+              # Glue Catalog access
+              - Effect: Allow
+                Action:
+                  - glue:Get*
+                  - glue:List*
+                  - glue:BatchGet*
+                  - glue:CreateDatabase
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                  - glue:UpdatePartition
+                  - glue:BatchCreatePartition
+                Resource: "*"
+              # S3 Vectors
+              - Effect: Allow
+                Action:
+                  - s3vectors:CreateVectorBucket
+                  - s3vectors:DeleteVectorBucket
+                  - s3vectors:CreateIndex
+                  - s3vectors:DeleteIndex
+                  - s3vectors:PutVectors
+                Resource: "*"
+              # Bedrock for embeddings (cross-region: us-east-1)
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.nova-2-multimodal-embeddings-v1:0"
+                  - "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-2-multimodal-embeddings-v1:0"
+              # Lake Formation
+              - Effect: Allow
+                Action:
+                  - lakeformation:GetDataAccess
+                  - lakeformation:GetDataLakeSettings
+                Resource: "*"
+
+  # ============================================================
+  # Custom Resource: Data Copy Lambda
+  # Copies data from Assets Bucket to Workshop Data Bucket
+  # ============================================================
+  DataCopyFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: WorkshopDataBucket
+    Properties:
+      FunctionName: workshop-data-copy
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          SOURCE_BUCKET: !Ref CloudLabAssetBucket
+          SOURCE_PREFIX: !Sub "${CloudLabAssetPrefix}/assets/"
+          DEST_BUCKET: !Ref WorkshopDataBucket
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import urllib.request
+          import boto3
+
+          s3 = boto3.client('s3')
+
+          def send_response(event, context, status, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason or f'See CloudWatch Log Stream: {context.log_stream_name}',
+                  'PhysicalResourceId': context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId']
+              })
+              req = urllib.request.Request(event['ResponseURL'], data=body.encode(), method='PUT',
+                                          headers={'Content-Type': ''})
+              urllib.request.urlopen(req)
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  send_response(event, context, 'SUCCESS')
+                  return
+
+              try:
+                  src_bucket = os.environ['SOURCE_BUCKET']
+                  src_prefix = os.environ['SOURCE_PREFIX']
+                  dst_bucket = os.environ['DEST_BUCKET']
+
+                  # Copy data/ directory (parquet + iceberg_source + documents)
+                  prefixes_to_copy = ['data/parquet/', 'data/iceberg_source/', 'data/documents/']
+
+                  for data_prefix in prefixes_to_copy:
+                      full_prefix = f"{src_prefix}{data_prefix}"
+                      paginator = s3.get_paginator('list_objects_v2')
+                      for page in paginator.paginate(Bucket=src_bucket, Prefix=full_prefix):
+                          for obj in page.get('Contents', []):
+                              src_key = obj['Key']
+                              # Strip the assets prefix to get relative path
+                              rel_key = src_key[len(f"{src_prefix}data/"):]
+                              dst_key = rel_key
+                              s3.copy_object(
+                                  CopySource={'Bucket': src_bucket, 'Key': src_key},
+                                  Bucket=dst_bucket,
+                                  Key=dst_key
+                              )
+
+                  # Copy strands_agent_mcp.zip to downloads/ for participant download (Lab 4)
+                  agent_zip_key = f"{src_prefix}strands_agent_mcp.zip"
+                  s3.copy_object(
+                      CopySource={'Bucket': src_bucket, 'Key': agent_zip_key},
+                      Bucket=dst_bucket,
+                      Key='downloads/strands_agent_mcp.zip'
+                  )
+                  print(f"Copied strands_agent_mcp.zip to {dst_bucket}/downloads/")
+
+                  print(f"Data copy complete from {src_bucket}/{src_prefix}data/ to {dst_bucket}/")
+                  send_response(event, context, 'SUCCESS')
+              except Exception as e:
+                  print(f"Error: {e}")
+                  send_response(event, context, 'FAILED', str(e))
+
+  DataCopyCustomResource:
+    Type: Custom::DataCopy
+    DependsOn:
+      - WorkshopDataBucket
+      - PaymentTransactionsTable
+      - CustomerProfilesSourceTable
+    Properties:
+      ServiceToken: !GetAtt DataCopyFunction.Arn
+      Timestamp: !Sub "${AWS::StackName}-${AWS::Region}"
+
+  # ============================================================
+  # Custom Resource: Partition Repair Lambda
+  # Runs MSCK REPAIR TABLE to register Hive partitions
+  # ============================================================
+  PartitionRepairFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: workshop-partition-repair
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Environment:
+        Variables:
+          WORKGROUP: workshop-workgroup
+          OUTPUT_LOCATION: !Sub "s3://${AthenaResultsBucket}/results/"
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import time
+          import urllib.request
+          import boto3
+
+          athena = boto3.client('athena')
+
+          def send_response(event, context, status, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason or f'See CloudWatch Log Stream: {context.log_stream_name}',
+                  'PhysicalResourceId': context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId']
+              })
+              req = urllib.request.Request(event['ResponseURL'], data=body.encode(), method='PUT',
+                                          headers={'Content-Type': ''})
+              urllib.request.urlopen(req)
+
+          def run_query(sql):
+              resp = athena.start_query_execution(
+                  QueryString=sql,
+                  WorkGroup=os.environ['WORKGROUP'],
+                  ResultConfiguration={'OutputLocation': os.environ['OUTPUT_LOCATION']}
+              )
+              qid = resp['QueryExecutionId']
+              while True:
+                  status = athena.get_query_execution(QueryExecutionId=qid)
+                  state = status['QueryExecution']['Status']['State']
+                  if state in ('SUCCEEDED',):
+                      return True
+                  elif state in ('FAILED', 'CANCELLED'):
+                      reason = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown')
+                      raise Exception(f"Query failed: {reason}")
+                  time.sleep(2)
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  send_response(event, context, 'SUCCESS')
+                  return
+
+              try:
+                  for attempt in range(3):
+                      try:
+                          run_query("MSCK REPAIR TABLE transactions_db.payment_transactions")
+                          print("Partition repair complete")
+                          send_response(event, context, 'SUCCESS')
+                          return
+                      except Exception as e:
+                          if attempt < 2:
+                              print(f"Attempt {attempt+1} failed, retrying in 10s: {e}")
+                              time.sleep(10)
+                          else:
+                              raise
+              except Exception as e:
+                  print(f"Error: {e}")
+                  send_response(event, context, 'FAILED', str(e))
+
+  PartitionRepairCustomResource:
+    Type: Custom::PartitionRepair
+    DependsOn:
+      - DataCopyCustomResource
+      - WorkshopAthenaWorkgroup
+      - PaymentTransactionsTable
+    Properties:
+      ServiceToken: !GetAtt PartitionRepairFunction.Arn
+      Timestamp: !Sub "${AWS::StackName}-${AWS::Region}"
+
+  # ============================================================
+  # Custom Resource: Iceberg Table Creator Lambda
+  # Creates Iceberg table and inserts data from source table
+  # ============================================================
+  IcebergCreatorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: workshop-iceberg-creator
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          WORKGROUP: workshop-workgroup
+          OUTPUT_LOCATION: !Sub "s3://${AthenaResultsBucket}/results/"
+          DATA_BUCKET: !Ref WorkshopDataBucket
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import time
+          import urllib.request
+          import boto3
+
+          athena = boto3.client('athena')
+
+          def send_response(event, context, status, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason or f'See CloudWatch Log Stream: {context.log_stream_name}',
+                  'PhysicalResourceId': context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId']
+              })
+              req = urllib.request.Request(event['ResponseURL'], data=body.encode(), method='PUT',
+                                          headers={'Content-Type': ''})
+              urllib.request.urlopen(req)
+
+          def run_query(sql):
+              resp = athena.start_query_execution(
+                  QueryString=sql,
+                  WorkGroup=os.environ['WORKGROUP'],
+                  ResultConfiguration={'OutputLocation': os.environ['OUTPUT_LOCATION']}
+              )
+              qid = resp['QueryExecutionId']
+              while True:
+                  status = athena.get_query_execution(QueryExecutionId=qid)
+                  state = status['QueryExecution']['Status']['State']
+                  if state == 'SUCCEEDED':
+                      return True
+                  elif state in ('FAILED', 'CANCELLED'):
+                      reason = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown')
+                      raise Exception(f"Query failed: {reason}\nSQL: {sql}")
+                  time.sleep(3)
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  send_response(event, context, 'SUCCESS')
+                  return
+
+              try:
+                  bucket = os.environ['DATA_BUCKET']
+
+                  create_ddl = f"""
+                  CREATE TABLE customers_db.customer_profiles (
+                      customer_id STRING, customer_name STRING, email STRING, phone STRING,
+                      gender STRING, age_group STRING, province STRING, city STRING,
+                      registration_date STRING, customer_tier STRING, return_rate DOUBLE,
+                      lifetime_value DOUBLE, total_orders INT, total_spend DOUBLE,
+                      dispute_count INT, preferred_category STRING, preferred_payment STRING,
+                      last_active_date STRING, account_status STRING, credit_score INT
+                  ) LOCATION 's3://{bucket}/iceberg/customer_profiles/'
+                  TBLPROPERTIES ('table_type'='ICEBERG', 'format'='PARQUET')
+                  """
+                  print("Creating Iceberg table...")
+                  run_query(create_ddl)
+
+                  insert_sql = """
+                  INSERT INTO customers_db.customer_profiles
+                  SELECT * FROM customers_db.customer_profiles_source
+                  """
+                  print("Inserting data into Iceberg table...")
+                  run_query(insert_sql)
+
+                  print("Iceberg table created and populated successfully")
+                  send_response(event, context, 'SUCCESS')
+              except Exception as e:
+                  print(f"Error: {e}")
+                  send_response(event, context, 'FAILED', str(e))
+
+  IcebergCreatorCustomResource:
+    Type: Custom::IcebergCreator
+    DependsOn:
+      - DataCopyCustomResource
+      - CustomerProfilesSourceTable
+      - WorkshopAthenaWorkgroup
+      - LakeFormationSettings
+    Properties:
+      ServiceToken: !GetAtt IcebergCreatorFunction.Arn
+      Timestamp: !Sub "${AWS::StackName}-${AWS::Region}"
+
+  # ============================================================
+  # Custom Resource: S3 Vectors Setup Lambda
+  # Creates vector bucket, index, reads PDFs with pymupdf, chunks, embeds, stores vectors
+  # ============================================================
+  PyMuPDFLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: workshop-pymupdf
+      Description: PyMuPDF library for PDF text extraction
+      Content:
+        S3Bucket: !Ref CloudLabAssetBucket
+        S3Key: !Sub "${CloudLabAssetPrefix}/assets/cfn/pymupdf-layer.zip"
+      CompatibleRuntimes:
+        - python3.11
+
+  S3VectorsSetupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: workshop-s3vectors-setup
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Layers:
+        - !Ref PyMuPDFLayer
+      Environment:
+        Variables:
+          SOURCE_BUCKET: !Ref CloudLabAssetBucket
+          SOURCE_PREFIX: !Sub "${CloudLabAssetPrefix}/assets/"
+          VECTOR_BUCKET_NAME: !Sub "workshop-vectors-${AWS::AccountId}"
+          INDEX_NAME: knowledge-base-index
+          EMBED_MODEL_ID: "amazon.nova-2-multimodal-embeddings-v1:0"
+          BEDROCK_REGION: us-east-1
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import time
+          import urllib.request
+          import boto3
+          import fitz  # pymupdf
+
+          s3 = boto3.client('s3')
+          s3vectors = boto3.client('s3vectors')
+          bedrock = boto3.client('bedrock-runtime', region_name=os.environ.get('BEDROCK_REGION', 'us-east-1'))
+
+          EMBEDDING_DIMENSIONS = 1024
+          CHUNK_SIZE = 500
+          CHUNK_OVERLAP = 50
+
+          def send_response(event, context, status, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason or f'See CloudWatch Log Stream: {context.log_stream_name}',
+                  'PhysicalResourceId': context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId']
+              })
+              req = urllib.request.Request(event['ResponseURL'], data=body.encode(), method='PUT',
+                                          headers={'Content-Type': ''})
+              urllib.request.urlopen(req)
+
+          def get_embedding(text):
+              model_id = os.environ['EMBED_MODEL_ID']
+              if len(text) > 32000:
+                  text = text[:32000]
+              request_body = {
+                  'taskType': 'SINGLE_EMBEDDING',
+                  'singleEmbeddingParams': {
+                      'embeddingPurpose': 'GENERIC_INDEX',
+                      'embeddingDimension': EMBEDDING_DIMENSIONS,
+                      'text': {'truncationMode': 'END', 'value': text}
+                  }
+              }
+              resp = bedrock.invoke_model(
+                  modelId=model_id,
+                  contentType='application/json',
+                  accept='application/json',
+                  body=json.dumps(request_body)
+              )
+              result = json.loads(resp['body'].read())
+              return result['embeddings'][0]['embedding']
+
+          def extract_text_from_pdf(pdf_bytes):
+              doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+              chunks = []
+              for page_num in range(len(doc)):
+                  page = doc[page_num]
+                  text = page.get_text()
+                  if not text.strip():
+                      continue
+                  page_chunks = split_text(text, CHUNK_SIZE, CHUNK_OVERLAP)
+                  for i, chunk in enumerate(page_chunks):
+                      chunks.append({
+                          'page': page_num + 1,
+                          'chunk_index': i,
+                          'text': chunk
+                      })
+              doc.close()
+              return chunks
+
+          def split_text(text, chunk_size, overlap):
+              chunks = []
+              start = 0
+              while start < len(text):
+                  end = start + chunk_size
+                  chunk = text[start:end].strip()
+                  if chunk:
+                      chunks.append(chunk)
+                  start = end - overlap
+              return chunks
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  try:
+                      vector_bucket = os.environ['VECTOR_BUCKET_NAME']
+                      index_name = os.environ['INDEX_NAME']
+                      try:
+                          s3vectors.delete_index(vectorBucketName=vector_bucket, indexName=index_name)
+                      except Exception:
+                          pass
+                      try:
+                          s3vectors.delete_vector_bucket(vectorBucketName=vector_bucket)
+                      except Exception:
+                          pass
+                  except Exception:
+                      pass
+                  send_response(event, context, 'SUCCESS')
+                  return
+
+              try:
+                  src_bucket = os.environ['SOURCE_BUCKET']
+                  src_prefix = os.environ['SOURCE_PREFIX']
+                  vector_bucket = os.environ['VECTOR_BUCKET_NAME']
+                  index_name = os.environ['INDEX_NAME']
+
+                  # Step 1: Create vector bucket
+                  print(f"Creating vector bucket: {vector_bucket}")
+                  try:
+                      s3vectors.create_vector_bucket(vectorBucketName=vector_bucket)
+                  except Exception as e:
+                      if 'already exists' in str(e).lower() or 'Conflict' in str(e):
+                          print("Vector bucket already exists")
+                      else:
+                          raise
+                  time.sleep(5)
+
+                  # Step 2: Create index
+                  print(f"Creating index: {index_name}")
+                  try:
+                      s3vectors.create_index(
+                          vectorBucketName=vector_bucket,
+                          indexName=index_name,
+                          dataType='float32',
+                          dimension=EMBEDDING_DIMENSIONS,
+                          distanceMetric='cosine',
+                          metadataConfiguration={
+                              'nonFilterableMetadataKeys': ['textChunk', 'pageRange']
+                          }
+                      )
+                  except Exception as e:
+                      if 'already exists' in str(e).lower() or 'Conflict' in str(e):
+                          print("Index already exists")
+                      else:
+                          raise
+
+                  print("Index created, waiting 5s before ingestion...")
+                  time.sleep(5)
+
+                  # Step 3: Read PDFs, extract text, chunk, embed, store
+                  doc_prefix = f"{src_prefix}data/documents/"
+                  print(f"Listing PDFs from s3://{src_bucket}/{doc_prefix}")
+                  resp = s3.list_objects_v2(Bucket=src_bucket, Prefix=doc_prefix)
+                  pdf_files = [obj['Key'] for obj in resp.get('Contents', []) if obj['Key'].endswith('.pdf')]
+                  print(f"Found {len(pdf_files)} PDF files")
+
+                  total_vectors = 0
+                  for pdf_key in pdf_files:
+                      filename = pdf_key.split('/')[-1]
+                      doc_id = filename.replace('.pdf', '')
+                      print(f"Processing: {filename}")
+
+                      pdf_obj = s3.get_object(Bucket=src_bucket, Key=pdf_key)
+                      pdf_bytes = pdf_obj['Body'].read()
+
+                      chunks = extract_text_from_pdf(pdf_bytes)
+                      print(f"  Extracted {len(chunks)} chunks")
+
+                      batch_size = 10
+                      for i in range(0, len(chunks), batch_size):
+                          batch = chunks[i:i + batch_size]
+                          vectors = []
+                          for chunk in batch:
+                              embedding = get_embedding(chunk['text'])
+                              key = f"{doc_id}_p{chunk['page']}_c{chunk['chunk_index']}"
+                              vectors.append({
+                                  'key': key,
+                                  'data': {'float32': embedding},
+                                  'metadata': {
+                                      'textChunk': chunk['text'][:1000],
+                                      'pageRange': f"p{chunk['page']}",
+                                      'docId': doc_id
+                                  }
+                              })
+                          s3vectors.put_vectors(
+                              vectorBucketName=vector_bucket,
+                              indexName=index_name,
+                              vectors=vectors
+                          )
+                          total_vectors += len(vectors)
+
+                  print(f"S3 Vectors setup complete: {total_vectors} vectors stored")
+                  send_response(event, context, 'SUCCESS')
+              except Exception as e:
+                  print(f"Error: {e}")
+                  import traceback
+                  traceback.print_exc()
+                  send_response(event, context, 'FAILED', str(e))
+
+  S3VectorsSetupCustomResource:
+    Type: Custom::S3VectorsSetup
+    DependsOn:
+      - DataCopyCustomResource
+    Properties:
+      ServiceToken: !GetAtt S3VectorsSetupFunction.Arn
+      Timestamp: !Sub "${AWS::StackName}-${AWS::Region}"
+
+  # ============================================================
+  # IAM - EC2 Role
+  # ============================================================
+  WorkshopEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: workshop-ec2-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: WorkshopEC2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3 Access (data + assets + codebuild sources)
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                Resource:
+                  - !GetAtt WorkshopDataBucket.Arn
+                  - !Sub "${WorkshopDataBucket.Arn}/*"
+                  - !GetAtt AthenaResultsBucket.Arn
+                  - !Sub "${AthenaResultsBucket.Arn}/*"
+                  - !Sub "arn:aws:s3:::${CloudLabAssetBucket}"
+                  - !Sub "arn:aws:s3:::${CloudLabAssetBucket}/*"
+                  - "arn:aws:s3:::bedrock-agentcore-codebuild-sources-*"
+                  - "arn:aws:s3:::bedrock-agentcore-codebuild-sources-*/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${WorkshopDataBucket.Arn}/*"
+                  - !Sub "${AthenaResultsBucket.Arn}/*"
+                  - "arn:aws:s3:::bedrock-agentcore-codebuild-sources-*/*"
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:PutBucketLifecycle
+                  - s3:PutLifecycleConfiguration
+                  - s3:PutBucketPolicy
+                  - s3:GetBucketLocation
+                Resource:
+                  - "arn:aws:s3:::bedrock-agentcore-codebuild-sources-*"
+              # Athena Access
+              - Effect: Allow
+                Action:
+                  - athena:Get*
+                  - athena:List*
+                  - athena:StartQueryExecution
+                Resource: "*"
+              # Glue Catalog Access
+              - Effect: Allow
+                Action:
+                  - glue:Get*
+                  - glue:List*
+                  - glue:BatchGet*
+                Resource: "*"
+              # Bedrock Access
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - "arn:aws:bedrock:*::foundation-model/amazon.nova-*"
+              # S3 Vectors Access
+              - Effect: Allow
+                Action:
+                  - s3vectors:Get*
+                  - s3vectors:List*
+                  - s3vectors:QueryVectors
+                Resource: "*"
+              # ECR Access (Lab 2 + cleanup)
+              - Effect: Allow
+                Action:
+                  - ecr:*
+                Resource: "*"
+              # AgentCore Access (Lab 2 deploy)
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:*
+                Resource: "*"
+              # Cognito (Lab 2 deploy + cleanup)
+              - Effect: Allow
+                Action:
+                  - cognito-idp:*
+                Resource: "*"
+              # IAM for Gateway & AgentCore SDK roles (Lab 2 + cleanup)
+              - Effect: Allow
+                Action:
+                  - iam:Get*
+                  - iam:List*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PassRole
+                  - iam:CreateServiceLinkedRole
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/Workshop*"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/workshop*"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/agentcore*"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/AmazonBedrockAgentCore*"
+                  - "arn:aws:iam::*:role/aws-service-role/*"
+              # CodeBuild (AgentCore SDK builds)
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGet*
+                  - codebuild:List*
+                  - codebuild:CreateProject
+                  - codebuild:UpdateProject
+                  - codebuild:StartBuild
+                Resource:
+                  - !Sub "arn:aws:codebuild:*:${AWS::AccountId}:project/bedrock-agentcore-*"
+              # CloudWatch Logs
+              - Effect: Allow
+                Action:
+                  - logs:Describe*
+                  - logs:Get*
+                  - logs:List*
+                  - logs:FilterLogEvents
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:PutRetentionPolicy
+                  - logs:PutResourcePolicy
+                  - logs:PutDeliverySource
+                  - logs:PutDeliveryDestination
+                  - logs:CreateDelivery
+                Resource: "*"
+              # SSM
+              - Effect: Allow
+                Action:
+                  - ssm:Get*
+                  - ssm:Describe*
+                  - ssm:List*
+                Resource: "*"
+              # Secrets Manager (AgentCore OAuth2)
+              - Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:ListSecrets
+                  - secretsmanager:DescribeSecret
+                Resource: "*"
+              # KMS
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: "*"
+              # STS
+              - Effect: Allow
+                Action:
+                  - sts:Get*
+                Resource: "*"
+              # X-Ray
+              - Effect: Allow
+                Action:
+                  - xray:Get*
+                  - xray:List*
+                  - xray:PutResourcePolicy
+                  - xray:UpdateTraceSegmentDestination
+                Resource: "*"
+              # Application Signals
+              - Effect: Allow
+                Action:
+                  - application-signals:StartDiscovery
+                Resource: "*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: workshop-ec2-profile
+      Roles:
+        - !Ref WorkshopEC2Role
+
+  # ============================================================
+  # EC2 Dev Instance (Lab 2 & Lab 4 operations)
+  # ============================================================
+  WorkshopSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Workshop dev instance - SSH + Streamlit + MCP
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8501
+          ToPort: 8501
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8001
+          CidrIp: 0.0.0.0/0
+
+  WorkshopEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - EC2InstanceProfile
+      - DataCopyCustomResource
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: m5.xlarge
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !GetAtt WorkshopSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: workshop-dev
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -ex
+
+          # System updates
+          dnf update -y
+          dnf install -y python3.11 python3.11-pip git unzip
+
+          # Install pip for python3.11
+          python3.11 -m ensurepip --upgrade 2>/dev/null || true
+
+          # Create workshop directory
+          WORKSHOP_DIR=/home/ec2-user/workshop
+          mkdir -p $WORKSHOP_DIR
+          cd $WORKSHOP_DIR
+
+          # Download and unzip MCP servers from Assets bucket
+          aws s3 cp s3://${CloudLabAssetBucket}/${CloudLabAssetPrefix}/assets/mcp-servers/athena-mcp.zip /tmp/athena-mcp.zip
+          aws s3 cp s3://${CloudLabAssetBucket}/${CloudLabAssetPrefix}/assets/mcp-servers/s3vectors-mcp.zip /tmp/s3vectors-mcp.zip
+          aws s3 cp s3://${CloudLabAssetBucket}/${CloudLabAssetPrefix}/assets/deploy/deploy.zip /tmp/deploy.zip
+
+          # Extract MCP servers
+          mkdir -p $WORKSHOP_DIR/mcp-servers/athena-mcp
+          mkdir -p $WORKSHOP_DIR/mcp-servers/s3vectors-mcp
+          mkdir -p $WORKSHOP_DIR/deploy
+
+          unzip -o /tmp/athena-mcp.zip -d $WORKSHOP_DIR/mcp-servers/athena-mcp/
+          unzip -o /tmp/s3vectors-mcp.zip -d $WORKSHOP_DIR/mcp-servers/s3vectors-mcp/
+          unzip -o /tmp/deploy.zip -d $WORKSHOP_DIR/deploy/
+
+          # Configure .env files for MCP servers
+          cat > $WORKSHOP_DIR/mcp-servers/athena-mcp/.env << 'ENVEOF'
+          DEFAULT_S3_OUTPUT_LOCATION=s3://${WorkshopDataBucket}/athena-results/
+          WORKGROUP=workshop-workgroup
+          AWS_REGION=${AWS::Region}
+          ENVEOF
+
+          cat > $WORKSHOP_DIR/mcp-servers/s3vectors-mcp/.env << 'ENVEOF'
+          VECTOR_BUCKET_NAME=workshop-vectors-${AWS::AccountId}
+          INDEX_NAME=knowledge-base-index
+          AWS_REGION=${AWS::Region}
+          ENVEOF
+
+          # Install Python dependencies
+          su - ec2-user -c "python3.11 -m pip install --user boto3 'mcp[cli]' bedrock-agentcore-starter-toolkit"
+
+          # Install dependencies for each MCP server
+          su - ec2-user -c "cd $WORKSHOP_DIR/mcp-servers/athena-mcp && python3.11 -m pip install --user -r requirements.txt"
+          su - ec2-user -c "cd $WORKSHOP_DIR/mcp-servers/s3vectors-mcp && python3.11 -m pip install --user -r requirements.txt"
+
+          # Set ownership
+          chown -R ec2-user:ec2-user $WORKSHOP_DIR
+
+          # Export AWS_REGION for ec2-user shell (deploy.py reads from env)
+          echo 'export AWS_REGION=${AWS::Region}' >> /home/ec2-user/.bashrc
+          echo 'export AWS_DEFAULT_REGION=${AWS::Region}' >> /home/ec2-user/.bashrc
+
+          # Signal completion
+          echo "Workshop environment setup complete!" > $WORKSHOP_DIR/.setup-complete
+          echo "Setup completed at $(date)" >> $WORKSHOP_DIR/.setup-complete
+
+  # ============================================================
+  # IAM User + Access Key for Lab 4 (local Strands Agent)
+  # Participants retrieve AK/SK from SSM Parameter Store
+  # ============================================================
+  LabUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: lab-user
+      Policies:
+        - PolicyName: LabUserPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - "arn:aws:bedrock:*::foundation-model/amazon.nova-*"
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.amazon.nova-*"
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/eu.amazon.nova-*"
+
+  LabUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref LabUser
+
+  AccessKeyIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /lab/credentials/access-key-id
+      Type: String
+      Value: !Ref LabUserAccessKey
+      Description: Lab User Access Key ID (for Lab 4 local Strands Agent)
+
+  SecretAccessKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /lab/credentials/secret-access-key
+      Type: String
+      Value: !GetAtt LabUserAccessKey.SecretAccessKey
+      Description: Lab User Secret Access Key (for Lab 4 local Strands Agent)
+
+  # ============================================================
+  # SSM Parameters (for cross-resource reference)
+  # ============================================================
+  DataBucketParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /workshop/data-bucket
+      Type: String
+      Value: !Ref WorkshopDataBucket
+      Description: Workshop data bucket name
+
+  AthenaWorkgroupParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /workshop/athena-workgroup
+      Type: String
+      Value: workshop-workgroup
+      Description: Athena workgroup name
+
+  VectorBucketParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /workshop/vector-bucket
+      Type: String
+      Value: !Sub "workshop-vectors-${AWS::AccountId}"
+      Description: S3 Vectors bucket name
+
+  StrandsAgentDownloadParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /workshop/strands-agent-download
+      Type: String
+      Value: !Sub "s3://${WorkshopDataBucket}/downloads/strands_agent_mcp.zip"
+      Description: S3 path for Strands Agent zip download (Lab 4)
+
+# ============================================================
+# Outputs
+# ============================================================
+Outputs:
+  DataBucketName:
+    Description: S3 bucket for workshop data
+    Value: !Ref WorkshopDataBucket
+
+  AthenaResultsBucketName:
+    Description: S3 bucket for Athena query results
+    Value: !Ref AthenaResultsBucket
+
+  AthenaWorkgroupName:
+    Description: Athena workgroup name
+    Value: workshop-workgroup
+
+  VectorBucketName:
+    Description: S3 Vectors bucket name
+    Value: !Sub "workshop-vectors-${AWS::AccountId}"
+
+  EC2InstanceId:
+    Description: EC2 instance ID (use Instance Connect or Session Manager)
+    Value: !Ref WorkshopEC2Instance
+
+  EC2PublicDns:
+    Description: EC2 public DNS
+    Value: !GetAtt WorkshopEC2Instance.PublicDnsName
+
+  LabUserAccessKeyId:
+    Description: "Lab User Access Key ID (for Lab 4 local Strands Agent)"
+    Value: !Ref LabUserAccessKey
+
+  LabUserSecretAccessKey:
+    Description: "Lab User Secret Access Key (for Lab 4 local Strands Agent)"
+    Value: !GetAtt LabUserAccessKey.SecretAccessKey
+
+  StrandsAgentDownloadPath:
+    Description: "S3 path for Strands Agent zip (Lab 4 - download via S3 Console or aws s3 cp)"
+    Value: !Sub "s3://${WorkshopDataBucket}/downloads/strands_agent_mcp.zip"
